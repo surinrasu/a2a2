@@ -1,0 +1,43 @@
+[build]
+alias = "b"
+description = "Build the a2a2 bridge binary locally"
+sources = [
+  "Cargo.lock",
+  "Cargo.toml",
+  "src/**/*.rs",
+]
+outputs = ["target/release/a2a2"]
+run = "cargo build --release --features bridge"
+
+[check]
+alias = "c"
+description = "Check the crate with all features"
+run = "cargo check --all-features"
+
+[fmt]
+description = "Format the Rust crate"
+run = "cargo fmt"
+
+["fmt:check"]
+description = "Check Rust formatting"
+run = "cargo fmt -- --check"
+
+[test]
+alias = "t"
+description = "Run tests with a higher file descriptor limit"
+env = { A2A2_TEST_ULIMIT = "8192", A2A2_TEST_THREADS = "2" }
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+
+ulimit -n "${A2A2_TEST_ULIMIT}"
+cargo test --all-features -- --test-threads="${A2A2_TEST_THREADS}"
+'''
+
+[ci]
+description = "Run the local validation path"
+run = [
+  { task = "fmt:check" },
+  { task = "check" },
+  { task = "test" },
+]

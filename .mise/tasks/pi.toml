@@ -1,0 +1,320 @@
+["pi:ssh"]
+description = "Verify SSH and sudo access to the Raspberry Pi"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+
+pi="${A2A2_PI_USER:-pi}@${A2A2_PI_HOST:-192.168.8.153}"
+
+ssh "$pi" 'bash -lc '"'"'
+  set -euo pipefail
+  echo "host=$(hostname)"
+  echo "kernel=$(uname -srmo)"
+  echo "user=$(id -un)"
+  sudo -n true
+'"'"''
+'''
+
+["pi:bootstrap"]
+description = "Install Raspberry Pi OS packages and enable base services"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+
+pi="${A2A2_PI_USER:-pi}@${A2A2_PI_HOST:-192.168.8.153}"
+remote_user="${A2A2_PI_USER:-pi}"
+
+ssh "$pi" "A2A2_REMOTE_USER=\"$remote_user\" bash -lc '
+  set -euo pipefail
+  sudo apt-get update
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    alsa-utils \
+    avahi-daemon \
+    bluez \
+    bluez-alsa-utils \
+    build-essential \
+    ca-certificates \
+    curl \
+    dbus \
+    dbus-user-session \
+    git \
+    iw \
+    libasound2-dev \
+    libdbus-1-dev \
+    pkg-config \
+    rfkill \
+    rsync
+  sudo systemctl enable --now bluetooth avahi-daemon
+  groups=audio,netdev,gpio
+  if getent group bluetooth >/dev/null 2>&1; then
+    groups=\"\$groups,bluetooth\"
+  fi
+  sudo usermod -aG \"\$groups\" \"\$A2A2_REMOTE_USER\"
+  sudo loginctl enable-linger \"\$A2A2_REMOTE_USER\" || true
+  systemctl --user mask --now \
+    wireplumber.service \
+    pipewire-pulse.service \
+    pipewire-pulse.socket \
+    pipewire.service \
+    pipewire.socket >/dev/null 2>&1 || true
+'"
+'''
+
+["pi:tune"]
+description = "Apply low-latency runtime tuning on the Raspberry Pi"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+
+pi="${A2A2_PI_USER:-pi}@${A2A2_PI_HOST:-192.168.8.153}"
+
+ssh "$pi" 'bash -lc '"'"'
+  set -euo pipefail
+  sudo rfkill unblock bluetooth || true
+
+  for governor in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+    [ -e "$governor" ] || continue
+    echo performance | sudo tee "$governor" >/dev/null || true
+  done
+
+  if command -v iw >/dev/null 2>&1; then
+    while read -r iface; do
+      [ -n "$iface" ] || continue
+      sudo iw dev "$iface" set power_save off || true
+    done < <(iw dev | awk "/Interface/ { print \$2 }")
+  fi
+'"'"''
+'''
+
+["pi:rust"]
+description = "Install or update the minimal Rust toolchain on the Raspberry Pi"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+
+pi="${A2A2_PI_USER:-pi}@${A2A2_PI_HOST:-192.168.8.153}"
+
+ssh "$pi" 'bash -lc '"'"'
+  set -euo pipefail
+  if ! command -v cargo >/dev/null 2>&1; then
+    curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+  fi
+  "$HOME/.cargo/bin/rustup" default stable
+  "$HOME/.cargo/bin/rustup" component add rustfmt clippy || true
+  "$HOME/.cargo/bin/cargo" --version
+'"'"''
+'''
+
+["pi:sync"]
+description = "Sync the project to the Raspberry Pi"
+depends = ["pi:ssh"]
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+
+pi="${A2A2_PI_USER:-pi}@${A2A2_PI_HOST:-192.168.8.153}"
+dest="${A2A2_PI_DEST:-/home/pi/a2a2}"
+
+ssh "$pi" "mkdir -p \"$dest\""
+rsync -az --delete \
+  --exclude .git \
+  --exclude .mise.local.toml \
+  --exclude .DS_Store \
+  --exclude target \
+  ./ "$pi:$dest/"
+'''
+
+["pi:build"]
+description = "Build the bridge binary on the Raspberry Pi"
+run = [
+  { task = "pi:sync" },
+  { task = "pi:rust" },
+  { task = "pi:_build" },
+]
+
+["pi:_build"]
+hide = true
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+
+pi="${A2A2_PI_USER:-pi}@${A2A2_PI_HOST:-192.168.8.153}"
+dest="${A2A2_PI_DEST:-/home/pi/a2a2}"
+jobs="${A2A2_PI_JOBS:-1}"
+
+ssh "$pi" "cd \"$dest\" && \"\$HOME/.cargo/bin/cargo\" build --release --features bridge -j \"$jobs\""
+'''
+
+["pi:install-bin"]
+description = "Install the Raspberry Pi-built a2a2 binary"
+run = [
+  { task = "pi:build" },
+  { task = "pi:_install-bin" },
+]
+
+["pi:_install-bin"]
+hide = true
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+
+pi="${A2A2_PI_USER:-pi}@${A2A2_PI_HOST:-192.168.8.153}"
+dest="${A2A2_PI_DEST:-/home/pi/a2a2}"
+
+ssh "$pi" "cd \"$dest\" && sudo install -m 0755 target/release/a2a2 /usr/local/bin/a2a2 && /usr/local/bin/a2a2 --version"
+'''
+
+["pi:install-units"]
+description = "Install and reload the systemd units on the Raspberry Pi"
+run = [
+  { task = "pi:sync" },
+  { task = "pi:_install-units" },
+]
+
+["pi:_install-units"]
+hide = true
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+
+pi="${A2A2_PI_USER:-pi}@${A2A2_PI_HOST:-192.168.8.153}"
+dest="${A2A2_PI_DEST:-/home/pi/a2a2}"
+
+ssh "$pi" "sudo install -m 0644 \"$dest/deploy/bluealsa-a2a2.service\" /etc/systemd/system/bluealsa-a2a2.service && \
+sudo install -m 0644 \"$dest/deploy/a2a2.service\" /etc/systemd/system/a2a2.service && \
+sudo systemctl daemon-reload && \
+(sudo systemctl disable --now bluealsa.service bluealsa-aplay.service >/dev/null 2>&1 || true) && \
+(systemctl --user mask --now wireplumber.service pipewire-pulse.service pipewire-pulse.socket pipewire.service pipewire.socket >/dev/null 2>&1 || true) && \
+sudo systemctl enable --now bluealsa-a2a2.service"
+'''
+
+["pi:write-config"]
+description = "Write /etc/a2a2.toml on the Raspberry Pi from environment defaults"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+
+pi="${A2A2_PI_USER:-pi}@${A2A2_PI_HOST:-192.168.8.153}"
+tmp="$(mktemp)"
+trap 'rm -f "$tmp"' EXIT
+
+cat >"$tmp" <<EOF
+airplay_match = "${A2A2_AIRPLAY_MATCH:-Office}"
+pin = "${A2A2_AIRPLAY_PIN:-3939}"
+bt_alias = "${A2A2_BT_ALIAS:-a2a2 Bridge}"
+bt_class = ${A2A2_BT_CLASS:-0x240414}
+discoverable = ${A2A2_DISCOVERABLE:-true}
+hd_audio = ${A2A2_HD_AUDIO:-false}
+airplay_volume = ${A2A2_AIRPLAY_VOLUME:-0.20}
+sync_bluetooth_volume = ${A2A2_SYNC_BLUETOOTH_VOLUME:-false}
+render_delay_ms = ${A2A2_RENDER_DELAY_MS:-350}
+airplay_discovery_secs = ${A2A2_AIRPLAY_DISCOVERY_SECS:-5}
+bluetooth_wait_secs = ${A2A2_BLUETOOTH_WAIT_SECS:-0}
+EOF
+
+scp "$tmp" "$pi:/tmp/a2a2.toml"
+ssh "$pi" "sudo install -m 0644 /tmp/a2a2.toml /etc/a2a2.toml && rm -f /tmp/a2a2.toml && sudo sed -n '1,120p' /etc/a2a2.toml"
+'''
+
+["pi:restart"]
+description = "Restart the a2a2 services on the Raspberry Pi"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+
+pi="${A2A2_PI_USER:-pi}@${A2A2_PI_HOST:-192.168.8.153}"
+
+ssh "$pi" 'sudo systemctl restart bluealsa-a2a2.service a2a2.service'
+'''
+
+["pi:start"]
+description = "Enable and start the a2a2 bridge on the Raspberry Pi"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+
+pi="${A2A2_PI_USER:-pi}@${A2A2_PI_HOST:-192.168.8.153}"
+
+ssh "$pi" 'sudo systemctl enable --now bluealsa-a2a2.service a2a2.service'
+'''
+
+["pi:stop"]
+description = "Stop the a2a2 bridge on the Raspberry Pi"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+
+pi="${A2A2_PI_USER:-pi}@${A2A2_PI_HOST:-192.168.8.153}"
+
+ssh "$pi" 'sudo systemctl stop a2a2.service bluealsa-a2a2.service'
+'''
+
+["pi:status"]
+description = "Show Raspberry Pi service status"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+
+pi="${A2A2_PI_USER:-pi}@${A2A2_PI_HOST:-192.168.8.153}"
+
+ssh "$pi" 'systemctl --no-pager --full status a2a2.service bluealsa-a2a2.service'
+'''
+
+["pi:logs"]
+description = "Follow Raspberry Pi bridge logs"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+
+pi="${A2A2_PI_USER:-pi}@${A2A2_PI_HOST:-192.168.8.153}"
+lines="${A2A2_LOG_LINES:-200}"
+
+ssh "$pi" "journalctl -u a2a2.service -u bluealsa-a2a2.service -n \"$lines\" -f"
+'''
+
+["pi:discover"]
+description = "Discover AirPlay targets from the Raspberry Pi"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+
+pi="${A2A2_PI_USER:-pi}@${A2A2_PI_HOST:-192.168.8.153}"
+timeout="${A2A2_AIRPLAY_DISCOVERY_SECS:-5}"
+
+ssh "$pi" "/usr/local/bin/a2a2 discover --timeout-secs \"$timeout\""
+'''
+
+["pi:doctor"]
+description = "Run a2a2 doctor on the Raspberry Pi"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+
+pi="${A2A2_PI_USER:-pi}@${A2A2_PI_HOST:-192.168.8.153}"
+
+ssh "$pi" '/usr/local/bin/a2a2 --config /etc/a2a2.toml doctor'
+'''
+
+["pi:deploy"]
+description = "Build, install, configure, and restart a2a2 on the Raspberry Pi"
+run = [
+  { task = "pi:sync" },
+  { task = "pi:rust" },
+  { task = "pi:_build" },
+  { task = "pi:_install-bin" },
+  { task = "pi:_install-units" },
+  { task = "pi:write-config" },
+  { task = "pi:start" },
+  { task = "pi:restart" },
+  { task = "pi:status" },
+]
+
+["pi:setup"]
+description = "Provision a clean Raspberry Pi and deploy a2a2"
+run = [
+  { task = "pi:ssh" },
+  { task = "pi:bootstrap" },
+  { task = "pi:tune" },
+  { task = "pi:deploy" },
+  { task = "pi:doctor" },
+]

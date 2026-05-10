@@ -1,0 +1,30 @@
+# By name, model, IP address, or AirPlay device id.
+airplay_match = "HomePod"
+
+# Fallback pair PIN.
+pin = "3939"
+
+# Bluetooth name of the bridge shown to source devices.
+bt_alias = "a2a2 Bridge"
+
+# Bluetooth Class of Device. 0x240414 is Audio/Video Loudspeaker.
+bt_class = 0x240414
+
+# Keep discoverable after paired successfully.
+discoverable = true
+
+hd_audio = false
+
+# Fixed HomePod output volume used by the bridge.
+# Keep this and change only source volume to avoid super high or low volume.
+airplay_volume = 0.50
+
+# Send AVRCP absolute volume changes from source directly to AirPlay.
+sync_bluetooth_volume = false
+
+render_delay_ms = 350
+
+airplay_discovery_secs = 5
+
+# 0 means wait indefinitely for a Bluetooth source.
+bluetooth_wait_secs = 0

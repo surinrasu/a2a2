@@ -1,0 +1,14 @@
+[Unit]
+Description=BlueALSA for a2a2 A2DP sink
+After=bluetooth.service
+Requires=bluetooth.service
+Conflicts=bluealsa.service bluealsa-aplay.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/bluealsa -p a2dp-sink
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
